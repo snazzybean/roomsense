@@ -63,6 +63,7 @@ export class RsRoomDetail extends LitElement {
   @state() private _scheduleSelectorEntity = "";
   @state() private _comfortHeat = 21.0;
   @state() private _comfortCool = 24.0;
+  @state() private _comfortHeatEntity = "";
   @state() private _ecoHeat = 17.0;
   @state() private _ecoCool = 27.0;
   @state() private _error = "";
@@ -227,6 +228,10 @@ export class RsRoomDetail extends LitElement {
       const prevConfig = changedProps.get("config") as RoomConfig | null | undefined;
       if (prevConfig === null || prevConfig === undefined) {
         this._initFromConfig();
+      } else if (this._comfortHeatEntity && this.config?.comfort_heat !== undefined) {
+        // Comfort follows the source entity, so keep showing the device value —
+        // otherwise the next save would push a stale one back onto the device.
+        this._comfortHeat = this.config.comfort_heat;
       }
     }
 
@@ -269,6 +274,7 @@ export class RsRoomDetail extends LitElement {
       this._scheduleSelectorEntity = this.config.schedule_selector_entity ?? "";
       this._comfortHeat = this.config.comfort_heat ?? this.config.comfort_temp ?? 21.0;
       this._comfortCool = this.config.comfort_cool ?? 24.0;
+      this._comfortHeatEntity = this.config.comfort_heat_entity ?? "";
       this._ecoHeat = this.config.eco_heat ?? this.config.eco_temp ?? 17.0;
       this._ecoCool = this.config.eco_cool ?? 27.0;
       this._selectedPresencePersons = this.config.presence_persons ?? [];
@@ -309,6 +315,7 @@ export class RsRoomDetail extends LitElement {
       this._scheduleSelectorEntity = "";
       this._comfortHeat = 21.0;
       this._comfortCool = 24.0;
+      this._comfortHeatEntity = "";
       this._ecoHeat = 17.0;
       this._ecoCool = 27.0;
       this._selectedPresencePersons = [];
@@ -439,6 +446,7 @@ export class RsRoomDetail extends LitElement {
                     .activeScheduleIndex=${this.config?.live?.active_schedule_index ?? -1}
                     .comfortHeat=${this._comfortHeat}
                     .comfortCool=${this._comfortCool}
+                    .comfortHeatEntity=${this._comfortHeatEntity}
                     .ecoHeat=${this._ecoHeat}
                     .ecoCool=${this._ecoCool}
                     .climateMode=${this._climateMode}
@@ -687,6 +695,7 @@ export class RsRoomDetail extends LitElement {
             .activeScheduleIndex=${this.config?.live?.active_schedule_index ?? -1}
             .comfortHeat=${this._comfortHeat}
             .comfortCool=${this._comfortCool}
+            .comfortHeatEntity=${this._comfortHeatEntity}
             .ecoHeat=${this._ecoHeat}
             .ecoCool=${this._ecoCool}
             .climateMode=${this._climateMode}
@@ -694,6 +703,7 @@ export class RsRoomDetail extends LitElement {
             .editing=${true}
             @schedules-changed=${this._onSchedulesChanged}
             @schedule-selector-changed=${this._onScheduleSelectorChanged}
+            @comfort-source-changed=${this._onComfortSourceChanged}
             @comfort-heat-changed=${this._onComfortHeatChanged}
             @comfort-cool-changed=${this._onComfortCoolChanged}
             @eco-heat-changed=${this._onEcoHeatChanged}
@@ -904,6 +914,11 @@ export class RsRoomDetail extends LitElement {
     this._autoSave();
   }
 
+  private _onComfortSourceChanged(e: CustomEvent<{ value: string }>) {
+    this._comfortHeatEntity = e.detail.value;
+    this._autoSave();
+  }
+
   private _onComfortCoolChanged(e: CustomEvent<{ value: number }>) {
     this._comfortCool = e.detail.value;
     if (this._comfortHeat > this._comfortCool) this._comfortHeat = this._comfortCool;
@@ -1107,6 +1122,7 @@ export class RsRoomDetail extends LitElement {
         schedule_selector_entity: this._scheduleSelectorEntity,
         comfort_heat: this._comfortHeat,
         comfort_cool: this._comfortCool,
+        comfort_heat_entity: this._comfortHeatEntity,
         eco_heat: this._ecoHeat,
         eco_cool: this._ecoCool,
         presence_persons: this._selectedPresencePersons.filter((p) => p),

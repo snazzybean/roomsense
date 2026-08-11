@@ -243,6 +243,7 @@ class RoomMindStore:
             "eco_temp": eco_heat,
             "comfort_heat": comfort_heat,
             "comfort_cool": config.get("comfort_cool", DEFAULT_COMFORT_COOL),
+            "comfort_heat_entity": config.get("comfort_heat_entity", ""),
             "eco_heat": eco_heat,
             "eco_cool": config.get("eco_cool", DEFAULT_ECO_COOL),
             "presence_persons": config.get("presence_persons", []),

@@ -32,6 +32,7 @@
 - **Fan-only & Setback Idle Modes** - AC and heat pump devices can switch to fan-only or setback mode instead of turning off, keeping air circulation or low-load operation active.
 - **Per-Device Setpoint Mode** - Choose proportional (boost setpoint) or direct (exact target) control per device for optimal results with different hardware.
 - **Separate Heat/Cool Targets** - Independent comfort and eco temperatures for heating and cooling in auto mode, creating a natural dead-band.
+- **Comfort Setpoint from a Climate Entity** - Point a room at a wall display or dial (e.g. Aqara W100, exposed as `climate.*`) to use its setpoint as the comfort heating temperature. Two-way: turning the dial updates the room, changing it in the panel updates the device.
 - **Per-Room Climate Toggle** - Disable climate control for individual rooms while keeping other rooms active.
 - **Outdoor Areas** - Mark rooms as outdoor (e.g. balcony) to disable climate control while keeping monitoring.
 - **Analytics Dashboard** - Temperature charts with heating power, solar irradiance, and model predictions over 24h to 90 days.
@@ -64,7 +65,7 @@ After installation, RoomMind appears as a panel in the HA sidebar.
 3. **Add devices** - assign at least one thermostat or AC (`climate.*` entity)
 4. **Add a temperature sensor** (optional but recommended) - enables Full Control with proportional valve control
 5. **Add a schedule** - create a `schedule.*` helper in HA and assign it
-6. **Set temperatures** - configure comfort (schedule on) and eco (schedule off) temperatures
+6. **Set temperatures** - configure comfort (schedule on) and eco (schedule off) temperatures. Optionally pick a `climate.*` entity (e.g. a wall display) whose setpoint becomes the comfort heating temperature
 
 RoomMind starts controlling immediately. If MPC is enabled (default), the thermal model begins learning in the background.
 

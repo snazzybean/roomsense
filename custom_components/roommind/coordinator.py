@@ -11,8 +11,9 @@ from typing import Any
 from homeassistant.components.persistent_notification import async_create as async_create_notification
 from homeassistant.components.persistent_notification import async_dismiss as async_dismiss_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
@@ -71,6 +72,11 @@ from .managers.residual_heat_tracker import ResidualHeatTracker
 from .managers.valve_manager import ValveManager
 from .managers.weather_manager import WeatherManager
 from .managers.window_manager import WindowManager
+from .utils.comfort_utils import (
+    get_comfort_entity,
+    read_comfort_heat_setpoint,
+    setpoint_signature,
+)
 from .utils.device_utils import (
     build_rooms_devices_map,
     get_ac_eids,
@@ -201,6 +207,10 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         self._climate_control_switch_areas: set[str] = set()
         self._binary_sensor_entity_areas: set[str] = set()
         self._climate_entity_areas: set[str] = set()
+        # External comfort setpoint sources (climate entities acting as a dial)
+        self._comfort_source_entities: set[str] = set()
+        self._comfort_source_unsub: CALLBACK_TYPE | None = None
+        entry.async_on_unload(self._cancel_comfort_source_listener)
         # Per-entity cache of schedule blocks; fallback when schedule.get_schedule fails (#308)
         self._schedule_blocks_cache: dict[str, dict] = {}
         # Entity platform callbacks, set by platform async_setup_entry
@@ -221,6 +231,9 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         """
         store = self.hass.data[DOMAIN]["store"]
         rooms = store.get_rooms()
+
+        # Mirror external comfort setpoint dials into the rooms of this cycle
+        await self._async_sync_comfort_sources(rooms)
 
         # Read outdoor sensors from global settings
         settings = store.get_settings()
@@ -1731,6 +1744,93 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         if settings.get("schedule_off_action", "eco") == "off":
             return TargetTemps(heat=None, cool=None)
         return TargetTemps(heat=eco_heat, cool=eco_cool)
+
+    # ------------------------------------------------------------------
+    # External comfort setpoint sources
+    # ------------------------------------------------------------------
+
+    async def _async_sync_comfort_sources(self, rooms: dict[str, dict]) -> None:
+        """Mirror each room's comfort source entity into its comfort_heat.
+
+        A room may point ``comfort_heat_entity`` at a climate entity (e.g. an
+        Aqara W100 wall display) to use its dial as the comfort temperature.
+        Rooms without one — and sources that are missing, unavailable or report
+        an implausible setpoint — are left alone, so comfort stays exactly what
+        the panel stored. *rooms* is updated in place so the rest of this cycle
+        already runs on the new setpoint.
+        """
+        store = self.hass.data[DOMAIN]["store"]
+        tracked: set[str] = set()
+
+        for area_id, room in rooms.items():
+            entity_id = get_comfort_entity(room)
+            if not entity_id:
+                continue
+            tracked.add(entity_id)
+
+            value = read_comfort_heat_setpoint(self.hass, room)
+            if value is None:
+                continue
+
+            current = room.get("comfort_heat", room.get("comfort_temp", DEFAULT_COMFORT_HEAT))
+            try:
+                if abs(float(current) - value) < 0.05:
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+            updates = {"comfort_heat": value, "comfort_temp": value}
+            # Keep the dead-band intact: a dial turned above the cooling target
+            # would otherwise ask for heating and cooling at the same time.
+            cool = room.get("comfort_cool", DEFAULT_COMFORT_COOL)
+            if isinstance(cool, (int, float)) and cool < value:
+                updates["comfort_cool"] = value
+
+            room.update(updates)
+            try:
+                await store.async_update_room(area_id, dict(updates))
+            except KeyError:
+                continue
+            _LOGGER.debug(
+                "Room '%s': comfort_heat set to %.1f°C from source '%s'",
+                area_id,
+                value,
+                entity_id,
+            )
+
+        self._async_track_comfort_sources(tracked)
+
+    @callback
+    def _async_track_comfort_sources(self, entities: set[str]) -> None:
+        """(Re)subscribe to the configured comfort source entities."""
+        if entities == self._comfort_source_entities:
+            return
+        self._cancel_comfort_source_listener()
+        if entities:
+            self._comfort_source_unsub = async_track_state_change_event(
+                self.hass,
+                sorted(entities),
+                self._async_comfort_source_changed,
+            )
+            self._comfort_source_entities = entities
+
+    @callback
+    def _cancel_comfort_source_listener(self) -> None:
+        """Drop the comfort source subscription (also called on entry unload)."""
+        if self._comfort_source_unsub is not None:
+            self._comfort_source_unsub()
+            self._comfort_source_unsub = None
+        self._comfort_source_entities = set()
+
+    @callback
+    def _async_comfort_source_changed(self, event: Event[EventStateChangedData]) -> None:
+        """Refresh as soon as a comfort dial is turned, instead of next cycle."""
+        new_state = event.data.get("new_state")
+        if new_state is None:
+            return
+        if setpoint_signature(event.data.get("old_state")) == setpoint_signature(new_state):
+            return
+        self.hass.async_create_task(self.async_request_refresh())
 
     async def async_room_added(self, room: dict) -> None:
         """Create entity platform entities for a newly added/updated room and refresh data."""

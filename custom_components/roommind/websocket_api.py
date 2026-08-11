@@ -98,6 +98,7 @@ _ROOM_SAVE_FIELDS = (
     "eco_temp",
     "comfort_heat",
     "comfort_cool",
+    "comfort_heat_entity",
     "eco_heat",
     "eco_cool",
     "presence_persons",
@@ -194,11 +195,55 @@ def _validate_no_own_entities(config: dict, own_prefix: str) -> str | None:
         eid = device.get("entity_id", "")
         if eid.split(".", 1)[-1].startswith(own_prefix):
             return f"Cannot assign RoomMind's own entity '{eid}' to a room"
-    for field in ("temperature_sensor", "humidity_sensor"):
+    for field in ("temperature_sensor", "humidity_sensor", "comfort_heat_entity"):
         eid = config.get(field, "")
         if eid and eid.split(".", 1)[-1].startswith(own_prefix):
             return f"Cannot assign RoomMind's own entity '{eid}' to a room"
     return None
+
+
+def _validate_comfort_entity(config: dict) -> str | None:
+    """Check that the comfort source entity is a climate entity. Returns error or None."""
+    eid = config.get("comfort_heat_entity", "")
+    if eid and not eid.startswith("climate."):
+        return f"Comfort setpoint source '{eid}' must be a climate entity"
+    return None
+
+
+async def _async_push_comfort_to_source(hass: HomeAssistant, room: dict, config: dict) -> None:
+    """Push a panel-edited comfort_heat to the room's comfort source entity.
+
+    Keeps a wall display (e.g. Aqara W100) showing the same setpoint the panel
+    holds. No-op when the room has no source entity, when the value already
+    matches, or when the entity cannot take a setpoint right now.
+    """
+    from .utils.comfort_utils import (
+        build_set_temperature_data,
+        get_comfort_entity,
+        read_comfort_heat_setpoint,
+    )
+
+    entity_id = get_comfort_entity(room)
+    if not entity_id or "comfort_heat" not in config:
+        return
+
+    try:
+        target = float(config["comfort_heat"])
+    except (TypeError, ValueError):
+        return
+
+    current = read_comfort_heat_setpoint(hass, room)
+    if current is not None and abs(current - target) < 0.05:
+        return
+
+    data = build_set_temperature_data(hass, entity_id, target)
+    if data is None:
+        return
+
+    try:
+        await hass.services.async_call("climate", "set_temperature", data, blocking=False)
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning("Failed to push comfort setpoint to '%s'", entity_id)
 
 
 def _validate_no_duplicate_devices(config: dict) -> str | None:
@@ -379,6 +424,7 @@ async def websocket_list_rooms(
         vol.Optional("eco_temp"): vol.Coerce(float),
         vol.Optional("comfort_heat"): vol.Coerce(float),
         vol.Optional("comfort_cool"): vol.Coerce(float),
+        vol.Optional("comfort_heat_entity"): str,
         vol.Optional("eco_heat"): vol.Coerce(float),
         vol.Optional("eco_cool"): vol.Coerce(float),
         vol.Optional("presence_persons"): [str],
@@ -441,6 +487,11 @@ async def websocket_save_room(
     if err:
         connection.send_error(msg["id"], "duplicate_entity", err)
         return
+    # Comfort setpoint source must be a climate entity
+    err = _validate_comfort_entity(config)
+    if err:
+        connection.send_error(msg["id"], "invalid_entity", err)
+        return
 
     if ("thermostats" in config or "acs" in config) and "devices" not in config:
         _LOGGER.warning(
@@ -450,6 +501,10 @@ async def websocket_save_room(
         )
 
     room = await store.async_save_room(area_id, config)
+
+    # Mirror a panel-edited comfort temperature onto the source entity, so the
+    # coordinator's next sync does not pull the old device value back in.
+    await _async_push_comfort_to_source(hass, room, config)
 
     # Notify coordinator to create/update sensor entities for the room
     coordinator = _get_coordinator(hass)

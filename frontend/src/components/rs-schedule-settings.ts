@@ -42,6 +42,8 @@ export class RsScheduleSettings extends RsScheduleBase {
   @property({ type: Number }) public ecoCool = 27.0;
   @property({ type: String }) public climateMode: ClimateMode = "auto";
   @property({ attribute: false }) public scheduleTempWarnings: ScheduleTempWarning[] = [];
+  /** Optional climate entity (e.g. a wall display) whose setpoint is the comfort heat temp. */
+  @property({ type: String }) public comfortHeatEntity = "";
 
   static styles = [
     RsScheduleBase.sharedStyles,
@@ -215,6 +217,14 @@ export class RsScheduleSettings extends RsScheduleBase {
             >
           </div>`
         : nothing}
+      ${this.comfortHeatEntity
+        ? html`<div class="view-selector-info">
+            ${localize("schedule.comfort_source_prefix", l)}
+            <span class="schedule-link" @click=${() => this._openEntityInfo(this.comfortHeatEntity)}
+              >${this._getFriendlyName(this.comfortHeatEntity)}</span
+            >
+          </div>`
+        : nothing}
     `;
   }
 
@@ -240,8 +250,61 @@ export class RsScheduleSettings extends RsScheduleBase {
         localize("schedule.selector_warning", l),
         (value) => this._onSelectorEntityChange(value),
       )}
-      ${this._renderTemperatureInputs(l)}
+      ${this._renderTemperatureInputs(l)} ${this._renderComfortSourceSection(l)}
     `;
+  }
+
+  // ─── Comfort source entity ─────────────────────────────────────
+
+  /** Setpoint of the comfort source entity, in display units, or null. */
+  private _comfortSourceSetpoint(): number | null {
+    const state = this.comfortHeatEntity ? this.hass?.states?.[this.comfortHeatEntity] : null;
+    if (!state || state.state === "unavailable" || state.state === "unknown") return null;
+    const attrs = state.attributes ?? {};
+    const raw = (attrs.temperature ?? attrs.target_temp_low) as number | undefined;
+    return typeof raw === "number" ? raw : null;
+  }
+
+  private _renderComfortSourceSection(l: string) {
+    const setpoint = this._comfortSourceSetpoint();
+
+    return html`
+      <div class="selector-section">
+        <label class="form-label">${localize("schedule.comfort_source_label", l)}</label>
+        <ha-entity-picker
+          .hass=${this.hass}
+          .value=${this.comfortHeatEntity}
+          .includeDomains=${["climate"]}
+          allow-custom-entity
+          @value-changed=${this._onComfortSourceChanged}
+        ></ha-entity-picker>
+        ${this.comfortHeatEntity && setpoint !== null
+          ? html`<div class="selector-value">
+              ${localize("schedule.comfort_source_value", l, {
+                temp: String(setpoint),
+                unit: tempUnit(this.hass),
+              })}
+            </div>`
+          : nothing}
+        <div class="section-hint" style="margin-top:4px">
+          ${localize("schedule.comfort_source_hint", l)}
+        </div>
+      </div>
+    `;
+  }
+
+  private _onComfortSourceChanged(e: CustomEvent) {
+    e.stopPropagation();
+    const value = e.detail?.value ?? "";
+    if (value === this.comfortHeatEntity) return;
+    this.comfortHeatEntity = value;
+    this.dispatchEvent(
+      new CustomEvent("comfort-source-changed", {
+        detail: { value },
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   // ─── Schedule list ─────────────────────────────────────────────
