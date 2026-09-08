@@ -16,6 +16,14 @@ LOOKAHEAD_BASE_BLOCKS = 6
 # 1.0 so UFH lookahead (24 blocks = 120 min) matches the outer horizon minimum,
 # avoiding silent clamping. See issue #131.
 LOOKAHEAD_HORIZON_SCALE = 1.0
+# Cooling pre-conditioning horizon. Cool-capable rooms extend the lookahead to at
+# least this many blocks (18 = 90 min) so the optimizer can see an upcoming
+# comfort-window setpoint drop and start cooling early to be at target when the
+# window opens — the cooling analogue of UFH pre-heating. Bounded to cap steady-
+# state AC aggressiveness. No afterglow synthesis is needed for cooling: unlike a
+# UFH slab, an AC has negligible stored-emission afterglow, so the RC model's
+# post-run warm-back (block_Q=0) already models decay correctly.
+LOOKAHEAD_COOLING_BLOCKS = 18
 
 
 @dataclass
@@ -67,8 +75,11 @@ class MPCOptimizer:
 
     def __post_init__(self) -> None:
         # Set before optimize() runs so callers / patched optimize() still expose
-        # a sensible default. optimize() refreshes this from dt_minutes per call.
+        # a sensible default. optimize() refreshes these from dt_minutes per call.
         self._lookahead_blocks = LOOKAHEAD_BASE_BLOCKS
+        # Heating-only horizon, kept separate from the combined lookahead so the
+        # afterglow synthesis gate cannot be tripped by the cooling extension.
+        self._heating_lookahead_blocks = LOOKAHEAD_BASE_BLOCKS
 
     def optimize(
         self,
@@ -97,21 +108,34 @@ class MPCOptimizer:
         # Clamp inverted targets: cool must be >= heat
         cool_target_series = [max(h, c) for h, c in zip(heat_target_series, cool_target_series, strict=False)]
 
-        # Per-system decision lookahead. UFH (tau=90min) scales up so the cost
-        # function can see post-heating residual afterglow; radiator / "" stay
-        # at LOOKAHEAD_BASE_BLOCKS for byte-identical behaviour. Hybrid UFH+AC
-        # rooms (can_cool=True) also keep the base lookahead: extending the
-        # horizon without a matching cooling-side synthesis would shift the
-        # energy/comfort ratio for COOLING and cause more aggressive AC use.
+        # Per-system decision lookahead, taken as the max of two needs:
+        #  - slow heating systems (UFH, tau=90min) scale up so the cost function
+        #    can value pre-heating via the synthesized post-heating afterglow;
+        #    radiator / "" stay at LOOKAHEAD_BASE_BLOCKS.
+        #  - cool-capable rooms extend to LOOKAHEAD_COOLING_BLOCKS so the cost
+        #    function can see an upcoming comfort-window setpoint drop and pre-cool
+        #    (the cooling analogue of pre-heating). Cooling needs no afterglow
+        #    synthesis — the RC model already captures post-run warm-back.
+        # Hybrid UFH+AC rooms get both (max): winter pre-heating is preserved and
+        # summer pre-cooling is enabled.
+        #
+        # The heating horizon is tracked separately from the combined lookahead:
+        # the afterglow synthesis gate keys off the heating horizon alone, so a
+        # cooling-driven extension can never switch synthesis on for a system whose
+        # own tau does not warrant it (e.g. radiator + AC).
+        heating_lookahead = LOOKAHEAD_BASE_BLOCKS
         profile = HEATING_SYSTEM_PROFILES.get(self.heating_system_type) if self.heating_system_type else None
-        if profile and dt_minutes > 0 and not self.can_cool:
+        if profile and dt_minutes > 0:
             tau_blocks = math.ceil(profile["tau_minutes"] / dt_minutes)
-            self._lookahead_blocks = max(
-                LOOKAHEAD_BASE_BLOCKS,
+            heating_lookahead = max(
+                heating_lookahead,
                 self.min_run_blocks + math.ceil(LOOKAHEAD_HORIZON_SCALE * tau_blocks),
             )
-        else:
-            self._lookahead_blocks = LOOKAHEAD_BASE_BLOCKS
+        lookahead = heating_lookahead
+        if self.can_cool and dt_minutes > 0:
+            lookahead = max(lookahead, LOOKAHEAD_COOLING_BLOCKS)
+        self._heating_lookahead_blocks = heating_lookahead
+        self._lookahead_blocks = lookahead
 
         n_blocks = min(len(T_outdoor_series), len(heat_target_series), len(cool_target_series))
         if n_blocks == 0 or not math.isfinite(T_room):
@@ -250,11 +274,20 @@ class MPCOptimizer:
         """Evaluate the cost of taking an action, looking a few steps ahead.
 
         Per-system lookahead (self._lookahead_blocks) extends the window for
-        slow heating systems. For UFH, the HEATING hypothesis synthesizes its
-        own post-heating residual afterglow so the cost function values the
-        sustained-comfort benefit of pre-heating. Radiator / "" lookahead stays
-        at LOOKAHEAD_BASE_BLOCKS and synthesis is gated off — byte-identical
-        to pre-fix behaviour.
+        slow heating systems and for cool-capable rooms. For UFH, the HEATING
+        hypothesis synthesizes its own post-heating residual afterglow so the
+        cost function values the sustained-comfort benefit of pre-heating.
+        Cooling uses the extended lookahead to see an upcoming comfort-window
+        setpoint drop and pre-cool, but needs no afterglow synthesis (an AC has
+        negligible stored-emission afterglow; the RC model already captures
+        post-run warm-back). Radiator / "" rooms with no cooling stay at
+        LOOKAHEAD_BASE_BLOCKS with synthesis gated off — byte-identical to
+        pre-fix behaviour.
+
+        Synthesis is gated on self._heating_lookahead_blocks, not on the combined
+        lookahead, so adding cooling to a room never enables synthesis on its
+        heating hypothesis: a radiator + AC room keeps the same heating cost as an
+        unprofiled room at the same horizon.
         """
         lookahead = min(self._lookahead_blocks, len(future_T_outdoor))
         Q = self._action_to_Q(action)
@@ -265,7 +298,7 @@ class MPCOptimizer:
         occupancy = future_occupancy or []
         synthesis_enabled = (
             action == MODE_HEATING
-            and self._lookahead_blocks > LOOKAHEAD_BASE_BLOCKS
+            and self._heating_lookahead_blocks > LOOKAHEAD_BASE_BLOCKS
             and self.min_run_blocks > 0
             and bool(self.heating_system_type)
         )
