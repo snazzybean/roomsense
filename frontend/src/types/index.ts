@@ -124,6 +124,7 @@ export interface RoomConfig {
   eco_temp?: number;
   comfort_heat: number;
   comfort_cool: number;
+  comfort_heat_entity?: string;
   eco_heat: number;
   eco_cool: number;
   override_heat?: number | null;

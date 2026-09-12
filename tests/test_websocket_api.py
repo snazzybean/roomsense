@@ -2199,6 +2199,7 @@ def test_save_room_cover_deploy_threshold_rejects_negative():
         ("humidity_sensor", "sensor.roommind_living_room_mode"),
         ("window_sensors", ["binary_sensor.roommind_test"]),
         ("covers", ["cover.roommind_living_room_auto"]),
+        ("comfort_heat_entity", "climate.roommind_living_room_override"),
     ],
 )
 async def test_save_room_rejects_own_entities(ws_hass, store, connection, field, value):
@@ -3030,3 +3031,114 @@ async def test_list_rooms_defaults_coil_dry_settings(ws_hass, store, connection)
     assert result["coil_dry_fan_mode"] == "low"
     assert result["coil_dry_min_cooling_minutes"] == 10
     assert result["coil_dry_drain_minutes"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Comfort setpoint source (external climate entity)
+# ---------------------------------------------------------------------------
+
+
+def _source_state(temp=21.0, state="heat"):
+    """Return a mock climate state reporting *temp* as its setpoint."""
+    s = MagicMock()
+    s.state = state
+    s.attributes = {"temperature": temp}
+    return s
+
+
+@pytest.mark.asyncio
+async def test_save_room_stores_comfort_source(ws_hass, store, connection):
+    """The comfort source entity is persisted on the room."""
+    await store.async_load()
+    ws_hass.states.get = MagicMock(return_value=_source_state(21.0))
+    ws_hass.services.async_call = AsyncMock()
+
+    msg = {
+        "id": 2,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room",
+        "comfort_heat_entity": "climate.kontor_display",
+    }
+    await _save_room(ws_hass, connection, msg)
+
+    room = connection.send_result.call_args[0][1]["room"]
+    assert room["comfort_heat_entity"] == "climate.kontor_display"
+
+
+@pytest.mark.asyncio
+async def test_save_room_rejects_non_climate_comfort_source(ws_hass, store, connection):
+    """Only climate entities can act as the comfort setpoint source."""
+    await store.async_load()
+
+    msg = {
+        "id": 2,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room",
+        "comfort_heat_entity": "input_number.comfort",
+    }
+    await _save_room(ws_hass, connection, msg)
+
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "invalid_entity"
+
+
+@pytest.mark.asyncio
+async def test_save_room_pushes_comfort_to_source(ws_hass, store, connection):
+    """A comfort temperature edited in the panel is pushed to the source device."""
+    await store.async_load()
+    await store.async_save_room("living_room", {"comfort_heat_entity": "climate.kontor_display"})
+    ws_hass.states.get = MagicMock(return_value=_source_state(21.0))
+    ws_hass.services.async_call = AsyncMock()
+
+    msg = {
+        "id": 3,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room",
+        "comfort_heat": 23.0,
+    }
+    await _save_room(ws_hass, connection, msg)
+
+    ws_hass.services.async_call.assert_awaited_once_with(
+        "climate",
+        "set_temperature",
+        {"entity_id": "climate.kontor_display", "temperature": 23.0},
+        blocking=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_room_skips_push_when_unchanged(ws_hass, store, connection):
+    """Unrelated saves do not spam the source device with its own value."""
+    await store.async_load()
+    await store.async_save_room("living_room", {"comfort_heat_entity": "climate.kontor_display"})
+    ws_hass.states.get = MagicMock(return_value=_source_state(21.0))
+    ws_hass.services.async_call = AsyncMock()
+
+    msg = {
+        "id": 3,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room",
+        "comfort_heat": 21.0,
+        "display_name": "Living",
+    }
+    await _save_room(ws_hass, connection, msg)
+
+    ws_hass.services.async_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_save_room_no_push_without_source(ws_hass, store, connection):
+    """Rooms without a source entity never call climate.set_temperature."""
+    await store.async_load()
+    ws_hass.states.get = MagicMock(return_value=None)
+    ws_hass.services.async_call = AsyncMock()
+
+    msg = {
+        "id": 4,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room",
+        "comfort_heat": 23.0,
+    }
+    await _save_room(ws_hass, connection, msg)
+
+    ws_hass.services.async_call.assert_not_awaited()
